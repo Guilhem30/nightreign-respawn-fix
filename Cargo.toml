@@ -1,0 +1,36 @@
+[package]
+name = "respawn-gate-fix"
+description = "Elden Ring Nightreign: no more long black screen after dying when the respawn point has a different weather"
+version = "0.1.1-beta"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "respawn_gate_fix"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Finds the game's FD4 singletons (CSEventMan, CSWorldGeomMan, ...) by name.
+from-singleton = "3.0.1"
+pelite = "0.10"
+
+[dependencies.windows]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+]
+
+[profile.release]
+# Keep line info in the .pdb so crash reports can be read.
+debug = 1
+lto = "thin"
+codegen-units = 4
+# A panic must never unwind into the game's code.
+panic = "abort"

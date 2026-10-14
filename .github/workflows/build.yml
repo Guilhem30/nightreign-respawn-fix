@@ -1,0 +1,76 @@
+# Builds the DLL on every push and pull request, and publishes a GitHub
+# release when a version tag is pushed:
+#
+#   git tag v0.1.1-beta
+#   git push origin v0.1.1-beta
+#
+# Tags with a suffix (v0.1.1-beta, v0.2.0-rc1) become pre-releases.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to create the release on tags
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Lint (warnings are errors)
+        run: cargo clippy --release -- -D warnings
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = (cargo pkgid) -replace '.*[#@]', ''
+          $dir = "respawn-gate-fix-$version"
+          New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item target/release/respawn_gate_fix.dll $dir
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE $dir
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          "ZIP=$dir.zip" >> $env:GITHUB_ENV
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: respawn-gate-fix
+          path: |
+            target/release/respawn_gate_fix.dll
+            target/release/respawn_gate_fix.pdb
+            README.md
+
+      - name: Check the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = (cargo pkgid) -replace '.*[#@]', ''
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "tag ${{ github.ref_name }} does not match Cargo.toml version $version"
+          }
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
