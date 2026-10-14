@@ -10,7 +10,10 @@ a death, most often when you die during the night's tide event.
 
 ## Install
 
-Requires [me3](https://github.com/garyttierney/me3).
+**Easy install:** use Mod Engine 3 Manager. Install the mod from its Nexus Mods page:
+https://www.nexusmods.com/eldenringnightreign/mods/213
+
+**Manual install** requires [me3](https://github.com/garyttierney/me3).
 
 1. Copy `respawn_gate_fix.dll` into a folder of your Nightreign mods, for
    example `nightreign-mods/gatefix/`.
