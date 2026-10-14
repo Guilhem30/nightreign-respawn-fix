@@ -92,8 +92,10 @@ cargo build --release
 
 The DLL is at `target/release/respawn_gate_fix.dll`. The code is pure Rust, so
 no C compiler is needed. Every push is built by GitHub Actions
-(`.github/workflows/build.yml`); pushing a tag like `v0.1.1-beta` publishes a
-release with the zipped DLL. The tag must match the version in `Cargo.toml`.
+(`.github/workflows/build.yml`). Releases are automatic: when a push to `main`
+carries a `Cargo.toml` version that has no release yet, CI creates the tag
+`v<version>` and a release with the zipped DLL. To publish, bump the version
+and push.
 
 ## How it works, in code
 

@@ -1,10 +1,10 @@
-# Builds the DLL on every push and pull request, and publishes a GitHub
-# release when a version tag is pushed:
+# Builds the DLL on every push and pull request.
 #
-#   git tag v0.1.1-beta
-#   git push origin v0.1.1-beta
-#
-# Tags with a suffix (v0.1.1-beta, v0.2.0-rc1) become pre-releases.
+# Releases are automatic: on a push to main, if no release exists yet for the
+# version in Cargo.toml, this workflow creates the tag v<version> and a GitHub
+# release with the zipped DLL. To publish a new version, bump `version` in
+# Cargo.toml and push. Versions with a suffix (0.1.1-beta, 0.2.0-rc1) become
+# pre-releases. Pushing a tag v<version> by hand also publishes it.
 
 name: build
 
@@ -16,13 +16,13 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # needed to create the release on tags
+  contents: write # needed to create tags and releases
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -47,10 +47,11 @@ jobs:
           Copy-Item target/release/respawn_gate_fix.dll $dir
           Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE $dir
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          "VERSION=$version" >> $env:GITHUB_ENV
           "ZIP=$dir.zip" >> $env:GITHUB_ENV
 
       - name: Upload build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: respawn-gate-fix
           path: |
@@ -58,19 +59,39 @@ jobs:
             target/release/respawn_gate_fix.pdb
             README.md
 
-      - name: Check the tag matches Cargo.toml
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Decide whether this run publishes a release, and check that a pushed
+      # tag matches the version in Cargo.toml.
+      - name: Check release
+        if: github.event_name == 'push'
         shell: pwsh
         run: |
-          $version = (cargo pkgid) -replace '.*[#@]', ''
-          if ("v$version" -ne "${{ github.ref_name }}") {
-            throw "tag ${{ github.ref_name }} does not match Cargo.toml version $version"
+          $tag = "v$env:VERSION"
+          if ("${{ github.ref_type }}" -eq "tag") {
+            if ("${{ github.ref_name }}" -ne $tag) {
+              throw "tag ${{ github.ref_name }} does not match Cargo.toml version $env:VERSION"
+            }
+            "RELEASE=true" >> $env:GITHUB_ENV
+          } else {
+            # Push to main: release only if this version has no tag yet.
+            $existing = git ls-remote --tags origin "refs/tags/$tag"
+            if ($existing) {
+              Write-Host "$tag already released; build only"
+            } else {
+              Write-Host "$tag not released yet; publishing"
+              "RELEASE=true" >> $env:GITHUB_ENV
+            }
           }
+          "TAG=$tag" >> $env:GITHUB_ENV
 
+      # Creates the tag (at this commit) if needed, then the release. A tag
+      # created here does not start another run of this workflow.
       - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        if: env.RELEASE == 'true'
+        uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: Respawn Gate Fix ${{ env.VERSION }}
           files: ${{ env.ZIP }}
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(env.VERSION, '-') }}
           generate_release_notes: true
