@@ -3,8 +3,11 @@
 # Releases are automatic: on a push to main, if no release exists yet for the
 # version in Cargo.toml, this workflow creates the tag v<version> and a GitHub
 # release with the zipped DLL. To publish a new version, bump `version` in
-# Cargo.toml and push. Versions with a suffix (0.1.1-beta, 0.2.0-rc1) become
-# pre-releases. Pushing a tag v<version> by hand also publishes it.
+# Cargo.toml and push. Pushing a tag v<version> by hand also publishes it.
+#
+# Every release (betas included) is a normal release marked "Latest", and the
+# zip always has the same name, so this link always gets the newest version:
+#   https://github.com/<owner>/<repo>/releases/latest/download/respawn-gate-fix.zip
 
 name: build
 
@@ -46,9 +49,11 @@ jobs:
           New-Item -ItemType Directory $dir | Out-Null
           Copy-Item target/release/respawn_gate_fix.dll $dir
           Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE $dir
-          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          # Fixed file name (the folder inside carries the version) so the
+          # releases/latest/download link keeps working across versions.
+          Compress-Archive -Path $dir -DestinationPath "respawn-gate-fix.zip"
           "VERSION=$version" >> $env:GITHUB_ENV
-          "ZIP=$dir.zip" >> $env:GITHUB_ENV
+          "ZIP=respawn-gate-fix.zip" >> $env:GITHUB_ENV
 
       - name: Upload build
         uses: actions/upload-artifact@v7
@@ -93,5 +98,6 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: Respawn Gate Fix ${{ env.VERSION }}
           files: ${{ env.ZIP }}
-          prerelease: ${{ contains(env.VERSION, '-') }}
+          prerelease: false
+          make_latest: true
           generate_release_notes: true

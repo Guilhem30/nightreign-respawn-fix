@@ -7,6 +7,9 @@ reproduce, and its log collects details on the cases it may not cover yet
 Removes the long black screen (about 15 extra seconds) that sometimes follows
 a death, most often when you die during the night's tide event.
 
+**[Download the latest version (zip)](https://github.com/Guilhem30/nightreign-respawn-fix/releases/latest/download/respawn-gate-fix.zip)**
+· [All releases](https://github.com/Guilhem30/nightreign-respawn-fix/releases)
+
 
 ## Install
 
@@ -94,8 +97,8 @@ The DLL is at `target/release/respawn_gate_fix.dll`. The code is pure Rust, so
 no C compiler is needed. Every push is built by GitHub Actions
 (`.github/workflows/build.yml`). Releases are automatic: when a push to `main`
 carries a `Cargo.toml` version that has no release yet, CI creates the tag
-`v<version>` and a release with the zipped DLL. To publish, bump the version
-and push.
+`v<version>` and a release with `respawn-gate-fix.zip`, marked as the latest
+release. To publish, bump the version and push.
 
 ## How it works, in code
 
