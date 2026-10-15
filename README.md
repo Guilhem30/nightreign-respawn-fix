@@ -1,6 +1,6 @@
 # Respawn Gate Fix (Elden Ring Nightreign)
 
-**Version 0.2.0-beta.** This is a beta: it works on the cases we could
+**Version 0.2.0-beta.** This is a beta: it works on the cases I could
 reproduce, and its log collects details on the cases it may not cover yet
 (see [Reporting a problem](#reporting-a-problem)).
 
@@ -10,6 +10,16 @@ a death, most often when you die during the night's tide event.
 **[Download the latest version (zip)](https://github.com/Guilhem30/nightreign-respawn-fix/releases/latest/download/respawn-gate-fix.zip)**
 · [All releases](https://github.com/Guilhem30/nightreign-respawn-fix/releases)
 
+
+## How this was made
+
+I built this mod with a lot of help from Claude, including most of the Rust
+code. I know C++ and PHP, but I'm not yet fluent enough in Rust to audit every
+line myself, so I'd rather say so up front.
+
+The mod patches game code in memory and restores it afterwards, so a second
+pair of eyes on that part would be very welcome. If you spot a problem, please
+open an issue or a pull request.
 
 ## Install
 
