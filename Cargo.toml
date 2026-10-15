@@ -1,7 +1,7 @@
 [package]
 name = "respawn-gate-fix"
 description = "Elden Ring Nightreign: no more long black screen after dying when the respawn point has a different weather"
-version = "0.2.0-beta"
+version = "0.3.0-beta"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -10,6 +10,17 @@ publish = false
 [lib]
 name = "respawn_gate_fix"
 crate-type = ["cdylib"]
+
+[features]
+# Test-only ini keys (banner_test, test_skip_fix) for the dev harness. Never
+# in release builds.
+dev = []
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
 
 [dependencies]
 # Finds the game's FD4 singletons (CSEventMan, CSWorldGeomMan, ...) by name.
@@ -33,6 +44,7 @@ debug = 1
 lto = "thin"
 codegen-units = 4
 # Unwind (not abort): a panic stays inside our own thread, which then stops
-# and restores the game's code, instead of closing the game. Nothing of ours
-# runs on game threads, so a panic can never unwind into the game's code.
+# and restores the game's code, instead of closing the game. The only code of
+# ours on a game thread (the HUD hook in banner/hook.rs) catches panics itself, so
+# a panic can never unwind into the game's code.
 panic = "unwind"

@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "respawn-gate-fix"
-version = "0.2.0-beta"
+version = "0.3.0-beta"
 dependencies = [
  "from-singleton",
  "pelite",

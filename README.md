@@ -1,6 +1,6 @@
 # Respawn Gate Fix (Elden Ring Nightreign)
 
-**Version 0.2.0-beta.** This is a beta: it works on the cases I could
+**Version 0.3.0-beta.** This is a beta: it works on the cases I could
 reproduce, and its log collects details on the cases it may not cover yet
 (see [Reporting a problem](#reporting-a-problem)).
 
@@ -48,6 +48,7 @@ apply while the game runs.
 |---|---|---|
 | `enabled` | `true` | Turns the whole fix on or off. |
 | `verbose` | `true` | Adds details to the log for respawns that start a weather transition or take long. |
+| `notify` | `true` | Shows a message in the game's banner style after a respawn the fix had to act on: "Delayed respawn avoided", or "Delayed respawn couldn't be avoided. Check mod logs" if it still took 10 s or more. Ordinary respawns show nothing. |
 
 ## Reporting a problem
 
@@ -92,9 +93,14 @@ so the lighting may shift for a few seconds after you respawn.
   update changes that code, the DLL logs "not active" and does nothing.
 - Nothing is changed outside a pending respawn, so other scripted events keep
   the game's original behaviour.
-- No hooks, and no game files are modified. It runs on a single background
+- No game files are modified. The fix itself runs on a single background
   thread. If that thread ever hits an internal error, it stops and puts the
   game's code back; the game keeps running.
+- One hook, for the on-screen message only: the call to the HUD's per-frame
+  update is redirected (a 4-byte change) so the message can be shown from the
+  game's own thread, as the game does with its banners. The hook does nothing
+  except when a message is waiting. If its code pattern is not found, the fix
+  still works without messages.
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 
@@ -115,8 +121,13 @@ release. To publish, bump the version and push.
 
 ## How it works, in code
 
-`src/lib.rs` is a single commented file: the module comment explains the
-cause and the fix, and each constant documents the game offset it uses.
+`src/fix.rs` explains the cause and the fix and runs the main loop;
+`src/lib.rs` lists the other modules. Each constant documents the game offset
+it uses. `src/banner/` shows the on-screen messages.
+
+`cargo test` runs the unit tests. `cargo build --release --features dev` adds
+test-only ini keys (`banner_test`, `test_skip_fix`); release builds leave them
+out.
 
 ## License
 
