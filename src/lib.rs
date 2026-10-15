@@ -73,7 +73,13 @@
 //!
 //! * All work runs on one background thread of our own. Game data is read
 //!   with `ReadProcessMemory`, so a stale pointer fails cleanly instead of
-//!   crashing.
+//!   crashing. An internal error stops that thread (and restores the code),
+//!   not the game.
+//! * A scenery block is written only after it has been seen fading on two
+//!   checks in a row, and its flag is cleared only if the block is still
+//!   loaded, so a block unloaded in the meantime is never written.
+//! * The code is only switched if it still holds the expected bytes, so a
+//!   change made by another mod is left alone.
 //! * Game memory is written only while a respawn is pending, and only the
 //!   2-byte instruction and the one-byte fade flag described above; both are
 //!   restored when the player is back.
@@ -162,6 +168,11 @@ const EVENT_STATE_RESPAWN_PENDING: u32 = 4;
 const BLOCK_FADE_STATE: usize = 0x218;
 const BLOCK_FADE_INSTANT: usize = 0x21e;
 const FADE_STATE_FADING: u32 = 3;
+
+/// Upper bound on the steps of one walk of the block tree. An in-order walk
+/// takes at most about 2 steps per block, so this still allows the 4096
+/// blocks the walk used to be capped at.
+const MAX_TREE_STEPS: u32 = 16384;
 
 /// `WorldAreaWeather` fields: `+0x18` = 1 while a weather transition runs,
 /// `+0x28` low 16 bits = the base weather of the area, `+0x30` = an override
@@ -306,7 +317,13 @@ impl PatchSite {
     /// x86-64, so the game sees either the old or the new instruction.
     /// (A plain `memcpy` could write byte by byte, and a half-written
     /// `33 01` would decode as a different instruction.)
-    fn write(&mut self, bytes: [u8; 2]) -> bool {
+    ///
+    /// Only writes if the instruction still holds `from`: if another mod has
+    /// changed these bytes since, they are left alone.
+    fn write(&mut self, from: [u8; 2], bytes: [u8; 2]) -> bool {
+        if read::<[u8; 2]>(self.addr) != Some(from) {
+            return false;
+        }
         let value = u16::from_le_bytes(bytes);
         let mut old = PAGE_PROTECTION_FLAGS(0);
         unsafe {
@@ -330,17 +347,30 @@ impl PatchSite {
     }
 
     /// Skips the weather check (call while a respawn is pending).
+    ///
+    /// `active` always follows the bytes actually in memory, not whether the
+    /// write reported success.
     fn enable(&mut self) {
-        if !self.active && self.write(PATCHED) {
-            self.active = true;
+        if !self.active {
+            self.write(ORIGINAL, PATCHED);
+            self.active = read::<[u8; 2]>(self.addr) == Some(PATCHED);
         }
     }
 
     /// Restores the game's original code.
     fn disable(&mut self) {
-        if self.active && self.write(ORIGINAL) {
-            self.active = false;
+        if self.active {
+            self.write(PATCHED, ORIGINAL);
+            self.active = read::<[u8; 2]>(self.addr) == Some(PATCHED);
         }
+    }
+}
+
+/// If our thread ever stops (an internal error), the game gets its original
+/// code back.
+impl Drop for PatchSite {
+    fn drop(&mut self) {
+        self.disable();
     }
 }
 
@@ -519,6 +549,11 @@ impl Game {
     /// leftmost node; each node has `+0x0` left, `+0x8` parent, `+0x10` right,
     /// `+0x19` "is nil" flag, `+0x20` the block id and `+0x28` the block. This
     /// walks it in order without recursion.
+    ///
+    /// The game may be editing the tree while we read it. Every step counts
+    /// against one budget, so a tree that looks inconsistent (even one with a
+    /// loop) ends the walk instead of keeping our thread busy; the partial
+    /// list is dropped and the next tick tries again.
     fn geometry_blocks(&self) -> Vec<(u32, usize)> {
         let mut blocks = Vec::new();
         let head = read_ptr(read_ptr(self.geom_man) + 0x20);
@@ -526,9 +561,17 @@ impl Game {
             return blocks;
         }
         let is_nil = |node: usize| read::<u8>(node + 0x19).unwrap_or(1) != 0;
+        let mut steps = 0u32;
+        let mut step = || {
+            steps += 1;
+            steps <= MAX_TREE_STEPS
+        };
 
         let mut node = read_ptr(head); // leftmost node
-        while node != 0 && node != head && blocks.len() < 4096 {
+        while node != 0 && node != head {
+            if !step() {
+                return Vec::new();
+            }
             let id = read::<u32>(node + 0x20).unwrap_or(0);
             blocks.push((id, read_ptr(node + 0x28)));
 
@@ -542,11 +585,17 @@ impl Game {
                     if left == 0 || is_nil(left) {
                         break;
                     }
+                    if !step() {
+                        return Vec::new();
+                    }
                     node = left;
                 }
             } else {
                 let mut parent = read_ptr(node + 0x8);
                 while parent != 0 && !is_nil(parent) && node == read_ptr(parent + 0x10) {
+                    if !step() {
+                        return Vec::new();
+                    }
                     node = parent;
                     parent = read_ptr(node + 0x8);
                 }
@@ -627,8 +676,13 @@ struct Death {
     patched: bool,
     /// Scenery fades the fix finished early.
     fades_finished: u32,
-    /// Blocks whose instant flag the fix set; cleared again after the respawn.
-    flagged_blocks: Vec<usize>,
+    /// Blocks (id, address) whose instant flag the fix set; cleared again
+    /// after the respawn.
+    flagged_blocks: Vec<(u32, usize)>,
+    /// Blocks seen fading on the previous tick. A block is only written once
+    /// it is seen fading on two ticks in a row, so a stray read while the game
+    /// edits the block map never leads to a write.
+    fading_before: Vec<(u32, usize)>,
     /// Weather when the player died, and the latest seen since.
     weather_at_death: Option<Weather>,
     weather_now: Option<Weather>,
@@ -650,6 +704,7 @@ impl Death {
             patched: false,
             fades_finished: 0,
             flagged_blocks: Vec::new(),
+            fading_before: Vec::new(),
             weather_at_death: weather,
             weather_now: weather,
             transition_at: None,
@@ -696,12 +751,16 @@ impl Death {
         }
 
         // Part 2: finish scenery fades (and report every block seen fading).
-        for (id, block, instant) in game.fading_blocks() {
+        let fading = game.fading_blocks();
+        for &(id, block, instant) in &fading {
+            if !self.fading_before.contains(&(id, block)) {
+                continue; // first sighting, confirmed (or not) on the next tick
+            }
             let finish = settings.enabled && !instant;
             let finished = finish && write::<u8>(block + BLOCK_FADE_INSTANT, 1);
             if finished {
                 self.fades_finished += 1;
-                self.flagged_blocks.push(block);
+                self.flagged_blocks.push((id, block));
             }
             if !self.fades_seen.contains(&id) {
                 self.fades_seen.push(id);
@@ -714,14 +773,26 @@ impl Death {
                 self.note(format!("scenery block {id:#x} fading: {what}"));
             }
         }
+        self.fading_before = fading.into_iter().map(|(id, block, _)| (id, block)).collect();
     }
 
     /// Clears the instant flags the fix set. The game does not clear the flag
     /// itself, so without this every later weather change of those blocks
     /// would also be instant, outside of respawns.
-    fn clear_flags(&mut self) {
-        for block in self.flagged_blocks.drain(..) {
-            write::<u8>(block + BLOCK_FADE_INSTANT, 0);
+    ///
+    /// A block may have been unloaded since we set its flag (for example when
+    /// the expedition ends), and its memory reused by something else. So the
+    /// flag is only cleared on blocks that are still in the block map, under
+    /// the same id, with the flag still set.
+    fn clear_flags(&mut self, game: &Game) {
+        if self.flagged_blocks.is_empty() {
+            return;
+        }
+        let live = game.geometry_blocks();
+        for (id, block) in self.flagged_blocks.drain(..) {
+            if live.contains(&(id, block)) && read::<u8>(block + BLOCK_FADE_INSTANT) == Some(1) {
+                write::<u8>(block + BLOCK_FADE_INSTANT, 0);
+            }
         }
     }
 
@@ -835,7 +906,7 @@ fn run(dir: &Path) {
             // The player is back: undo the fade flags, note the time, report
             // a little later.
             (Some(mut d), false) if d.ended.is_none() => {
-                d.clear_flags();
+                d.clear_flags(&game);
                 d.ended = Some(Instant::now());
                 death = Some(d);
             }
@@ -875,7 +946,18 @@ pub unsafe extern "system" fn DllMain(module: HMODULE, reason: u32, _: *mut ()) 
         .unwrap_or_else(|| PathBuf::from("."));
     std::thread::Builder::new()
         .name("respawn-gate-fix".into())
-        .spawn(move || run(&dir))
+        .spawn(move || {
+            // An internal error stops the fix (the patch is restored on the way
+            // out), never the game.
+            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&dir)));
+            if ran.is_err() {
+                let mut log = Log(OpenOptions::new()
+                    .append(true)
+                    .open(dir.join("respawn_gate_fix.log"))
+                    .ok());
+                log.line("stopped after an internal error; the game's code is restored");
+            }
+        })
         .ok();
     true
 }

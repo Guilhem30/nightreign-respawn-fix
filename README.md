@@ -1,6 +1,6 @@
 # Respawn Gate Fix (Elden Ring Nightreign)
 
-**Version 0.1.1-beta.** This is a beta: it works on the cases we could
+**Version 0.2.0-beta.** This is a beta: it works on the cases we could
 reproduce, and its log collects details on the cases it may not cover yet
 (see [Reporting a problem](#reporting-a-problem)).
 
@@ -83,7 +83,10 @@ so the lighting may shift for a few seconds after you respawn.
 - Nothing is changed outside a pending respawn, so other scripted events keep
   the game's original behaviour.
 - No hooks, and no game files are modified. It runs on a single background
-  thread.
+  thread. If that thread ever hits an internal error, it stops and puts the
+  game's code back; the game keeps running.
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 
 ## Build
 
