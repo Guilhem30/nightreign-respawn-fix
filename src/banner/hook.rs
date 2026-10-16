@@ -141,8 +141,23 @@ fn is_stale(then: u32, now: u32) -> bool {
 /// next HUD update. Ignored once the hook has switched itself off.
 pub fn request(kind: u64, row: u32) {
     if !DISABLED.load(Ordering::Relaxed) {
-        PENDING.store(pack(kind, row, now_stamp()), Ordering::Release);
+        let stamp = now_stamp();
+        // Stress test only: the request is already too old when it is used.
+        #[cfg(feature = "dev")]
+        let stamp = if crate::chaos::roll(crate::chaos::Fault::BannerSlow) {
+            stamp.wrapping_sub(MAX_AGE_MS + 1_000) & STAMP_MASK
+        } else {
+            stamp
+        };
+        PENDING.store(pack(kind, row, stamp), Ordering::Release);
     }
+}
+
+/// Stress test only: switches a hook that turned itself off back on, so each
+/// scenario starts with a working one.
+#[cfg(feature = "dev")]
+pub fn rearm() {
+    DISABLED.store(false, Ordering::Relaxed);
 }
 
 /// The latest outcome since the last call (only the newest is kept).
@@ -240,26 +255,39 @@ unsafe extern "C" fn hud_update(hud: usize, frame_time: f32) {
         report(Status::Stale);
         return;
     }
-    // Never let a panic unwind into the game's code.
     // SAFETY: on the game thread, inside the HUD update (see `show_now`).
-    match std::panic::catch_unwind(|| unsafe { show_now(hud, word) }) {
-        Ok(status) => {
-            if status == Status::LayoutMismatch {
-                DISABLED.store(true, Ordering::Relaxed);
-            }
-            report(status);
-        }
-        Err(_) => {
-            DISABLED.store(true, Ordering::Relaxed);
-            report(Status::Panicked);
-        }
+    let status = guarded(|| unsafe { show_now(hud, word) });
+    report(status);
+}
+
+/// Runs `show` so that nothing can unwind into the game's code: a panic
+/// becomes `Status::Panicked`. After a panic or a layout mismatch the hook is
+/// switched off for good.
+///
+/// This is the safety boundary of the hook; the host tests exercise it
+/// directly (a panic must come out as a status, never as an unwind).
+fn guarded(show: impl FnOnce() -> Status + std::panic::UnwindSafe) -> Status {
+    let status = std::panic::catch_unwind(show).unwrap_or(Status::Panicked);
+    if matches!(status, Status::Panicked | Status::LayoutMismatch) {
+        DISABLED.store(true, Ordering::Relaxed);
     }
+    status
 }
 
 /// # Safety
 /// On the game thread, with the HUD the game passed to its update.
 unsafe fn show_now(hud: usize, word: u64) -> Status {
     let (kind, row, _) = unpack(word);
+    // Stress tests only: a panic and a wrong layout on the game thread.
+    #[cfg(feature = "dev")]
+    {
+        if crate::chaos::roll(crate::chaos::Fault::BannerPanic) {
+            panic!("chaos: injected panic on the game thread");
+        }
+        if crate::chaos::roll(crate::chaos::Fault::BannerLayout) {
+            return Status::LayoutMismatch;
+        }
+    }
     let manager = hud + MANAGER_OFFSET.load(Ordering::Relaxed);
     // The manager is a field of the HUD the game just updated; a failed read
     // means the HUD is not what we expect, so call nothing.
@@ -382,5 +410,57 @@ mod tests {
         };
         assert_ne!(len, 0);
         assert_eq!(info.Protect, PAGE_EXECUTE_READ);
+    }
+
+    #[test]
+    fn any_request_word_decodes_and_ages_without_panic() {
+        use crate::testutil::Rng;
+        let mut rng = Rng(0xC0FFEE);
+        for _ in 0..10_000 {
+            let word = rng.next();
+            let (kind, row, stamp) = unpack(word);
+            assert!(stamp <= STAMP_MASK && kind <= 0xFF);
+            let _ = is_stale(stamp, rng.next() as u32 & STAMP_MASK);
+            assert_eq!(unpack(pack(kind, row, stamp)), (kind, row, stamp));
+        }
+    }
+
+    #[test]
+    fn every_status_byte_is_handled() {
+        for b in 0..=255u8 {
+            if let Some(s) = Status::from_u8(b) {
+                assert_eq!(s as u8, b);
+                assert!(!s.describe().is_empty());
+            }
+        }
+    }
+
+    /// Tests that touch the hook's globals run one at a time.
+    static GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[test]
+    fn a_panic_becomes_a_status_and_switches_the_hook_off() {
+        let _own = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+        DISABLED.store(false, Ordering::Relaxed);
+        let status = guarded(|| panic!("injected: game thread"));
+        assert_eq!(status, Status::Panicked);
+        assert!(DISABLED.load(Ordering::Relaxed));
+        // Once off, no request is accepted.
+        PENDING.store(0, Ordering::Relaxed);
+        request(KIND_AVOIDED, 4200);
+        assert_eq!(PENDING.load(Ordering::Relaxed), 0);
+        DISABLED.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn a_layout_mismatch_switches_the_hook_off_but_a_shown_message_does_not() {
+        let _own = GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+        DISABLED.store(false, Ordering::Relaxed);
+        assert_eq!(guarded(|| Status::Shown), Status::Shown);
+        assert!(!DISABLED.load(Ordering::Relaxed));
+        assert_eq!(guarded(|| Status::Stale), Status::Stale);
+        assert!(!DISABLED.load(Ordering::Relaxed));
+        assert_eq!(guarded(|| Status::LayoutMismatch), Status::LayoutMismatch);
+        assert!(DISABLED.load(Ordering::Relaxed));
+        DISABLED.store(false, Ordering::Relaxed);
     }
 }

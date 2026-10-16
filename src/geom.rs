@@ -45,14 +45,17 @@ pub struct Fading {
 /// against one budget, so a tree that looks inconsistent (even one with a
 /// loop) ends the walk instead of keeping our thread busy; the partial list
 /// is dropped and the next tick tries again.
-pub fn blocks(mem: &impl Memory, geom_man: usize) -> Vec<(u32, usize)> {
+///
+/// `None` means the map could not be read (no manager, no head, or an
+/// inconsistent tree); `Some(empty)` is a map that really has no blocks.
+pub fn blocks(mem: &impl Memory, geom_man: usize) -> Option<Vec<(u32, usize)>> {
     let mut blocks = Vec::new();
     if geom_man == 0 {
-        return blocks;
+        return None;
     }
     let head = mem.read_ptr(geom_man + MAN_BLOCK_MAP);
     if head == 0 {
-        return blocks;
+        return None;
     }
     let is_nil = |node: usize| mem.read::<u8>(node + NODE_IS_NIL).unwrap_or(1) != 0;
     let mut steps = 0u32;
@@ -64,7 +67,7 @@ pub fn blocks(mem: &impl Memory, geom_man: usize) -> Vec<(u32, usize)> {
     let mut node = mem.read_ptr(head + NODE_LEFT); // leftmost node
     while node != 0 && node != head {
         if !step() {
-            return Vec::new();
+            return None;
         }
         let id = mem.read::<u32>(node + NODE_KEY).unwrap_or(0);
         blocks.push((id, mem.read_ptr(node + NODE_VALUE)));
@@ -80,7 +83,7 @@ pub fn blocks(mem: &impl Memory, geom_man: usize) -> Vec<(u32, usize)> {
                     break;
                 }
                 if !step() {
-                    return Vec::new();
+                    return None;
                 }
                 node = left;
             }
@@ -88,7 +91,7 @@ pub fn blocks(mem: &impl Memory, geom_man: usize) -> Vec<(u32, usize)> {
             let mut parent = mem.read_ptr(node + NODE_PARENT);
             while parent != 0 && !is_nil(parent) && node == mem.read_ptr(parent + NODE_RIGHT) {
                 if !step() {
-                    return Vec::new();
+                    return None;
                 }
                 node = parent;
                 parent = mem.read_ptr(node + NODE_PARENT);
@@ -96,12 +99,13 @@ pub fn blocks(mem: &impl Memory, geom_man: usize) -> Vec<(u32, usize)> {
             node = parent;
         }
     }
-    blocks
+    Some(blocks)
 }
 
 /// Blocks that are fading, with their instant flag.
 pub fn fading(mem: &impl Memory, geom_man: usize) -> Vec<Fading> {
     blocks(mem, geom_man)
+        .unwrap_or_default()
         .into_iter()
         .filter(|(_, block)| mem.read::<u32>(block + BLOCK_FADE_STATE) == Some(FADE_STATE_FADING))
         .map(|(id, block)| Fading {
@@ -194,19 +198,20 @@ mod tests {
         let m = three_blocks();
         assert_eq!(
             blocks(&m, MAN),
-            [(1, block(1)), (2, block(2)), (3, block(3))]
+            Some(vec![(1, block(1)), (2, block(2)), (3, block(3))])
         );
     }
 
     #[test]
     fn empty_or_missing_map() {
         let mut m = Fake::default();
-        assert!(blocks(&m, 0).is_empty());
-        assert!(blocks(&m, MAN).is_empty(), "unreadable manager");
+        assert_eq!(blocks(&m, 0), None);
+        assert_eq!(blocks(&m, MAN), None, "unreadable manager");
         m.put(MAN + MAN_BLOCK_MAP, HEAD);
         m.node(HEAD, HEAD, HEAD, HEAD, true, 0);
-        assert!(
-            blocks(&m, MAN).is_empty(),
+        assert_eq!(
+            blocks(&m, MAN),
+            Some(Vec::new()),
             "empty map: head links to itself"
         );
     }
@@ -216,7 +221,7 @@ mod tests {
         let mut m = three_blocks();
         // C's right child points back to A: an endless in-order walk.
         m.node(C, HEAD, B, A, false, 3);
-        assert!(blocks(&m, MAN).is_empty());
+        assert_eq!(blocks(&m, MAN), None);
     }
 
     #[test]
@@ -242,5 +247,33 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn random_garbage_trees_never_hang_or_panic() {
+        use crate::testutil::Rng;
+        let addrs: Vec<usize> = (0..12).map(|i| HEAD + i * 0x100).collect();
+        for seed in 1..=40u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let mut m = Fake::default();
+            m.put(MAN + MAN_BLOCK_MAP, HEAD);
+            let pick = |rng: &mut Rng| match rng.below(8) {
+                0 => 0,
+                1 => 0xdead_0000_0000,
+                _ => addrs[rng.below(addrs.len() as u64) as usize],
+            };
+            for &a in &addrs {
+                let (l, p, r) = (pick(&mut rng), pick(&mut rng), pick(&mut rng));
+                m.node(a, l, p, r, rng.below(4) == 0, rng.below(50) as u32);
+            }
+            for id in 0..50u32 {
+                m.put(block(id) + BLOCK_FADE_STATE, rng.below(5) as u32);
+            }
+            let found = blocks(&m, MAN).unwrap_or_default();
+            assert!(found.len() <= MAX_TREE_STEPS as usize, "seed {seed}");
+            for f in fading(&m, MAN) {
+                assert!(found.contains(&(f.id, f.block)), "seed {seed}");
+            }
+        }
     }
 }

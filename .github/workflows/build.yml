@@ -48,6 +48,7 @@ jobs:
         run: |
           cargo test --locked
           cargo test --locked --features dev
+          cargo test --locked --release
 
       - name: Build
         run: cargo build --release --locked

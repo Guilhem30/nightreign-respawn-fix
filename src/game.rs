@@ -58,6 +58,20 @@ pub struct Weather {
 }
 
 impl Game {
+    /// A `Game` over test structures: `event_man` and `geom_man` are the
+    /// addresses of the slots that hold the singleton pointers.
+    #[cfg(test)]
+    pub fn for_test(event_man: usize, geom_man: usize) -> Self {
+        Self {
+            event_man,
+            geom_man,
+            weather: 0,
+            world_chr_man: 0,
+            respawn_point_man: 0,
+            play_area: 0,
+        }
+    }
+
     /// Looks the singletons up by name. `None` until the game has registered
     /// the two required ones (early in the boot).
     pub fn find() -> Option<Self> {
@@ -83,12 +97,24 @@ impl Game {
     /// True from the player's death until they are back in the world.
     pub fn respawn_pending(&self) -> bool {
         let state_obj = read_ptr(read_ptr(self.event_man) + EVENT_STATE);
-        state_obj != 0
-            && read::<u32>(state_obj + EVENT_STATE_VALUE) == Some(EVENT_STATE_RESPAWN_PENDING)
+        let pending = state_obj != 0
+            && read::<u32>(state_obj + EVENT_STATE_VALUE) == Some(EVENT_STATE_RESPAWN_PENDING);
+        // Stress test only: the state flips at random.
+        #[cfg(feature = "dev")]
+        if crate::chaos::roll(crate::chaos::Fault::Flap) {
+            return !pending;
+        }
+        pending
     }
 
-    /// All geometry blocks as (block id, block address).
-    pub fn geometry_blocks(&self) -> Vec<(u32, usize)> {
+    /// All geometry blocks as (block id, block address); `None` if the map
+    /// cannot be read right now.
+    pub fn geometry_blocks(&self) -> Option<Vec<(u32, usize)>> {
+        // Stress test only: the block map is unreadable for a few reads.
+        #[cfg(feature = "dev")]
+        if crate::chaos::map_blocked() {
+            return None;
+        }
         geom::blocks(&Process, read_ptr(self.geom_man))
     }
 

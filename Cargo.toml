@@ -1,7 +1,7 @@
 [package]
 name = "respawn-gate-fix"
 description = "Elden Ring Nightreign: no more long black screen after dying when the respawn point has a different weather"
-version = "0.3.0-beta"
+version = "0.3.1-beta"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -41,8 +41,14 @@ features = [
 [profile.release]
 # Keep line info in the .pdb so crash reports can be read.
 debug = 1
-lto = "thin"
-codegen-units = 4
+# Smaller DLL: the fix is not performance-critical (a 10 ms poll loop and a
+# once-per-frame hook that returns at once), so optimize for size, with one
+# codegen unit and whole-program LTO. Safety does not depend on these flags:
+# `panic = "unwind"` below must stay, and the host tests also run with
+# `cargo test --release` against this profile.
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
 # Unwind (not abort): a panic stays inside our own thread, which then stops
 # and restores the game's code, instead of closing the game. The only code of
 # ours on a game thread (the HUD hook in banner/hook.rs) catches panics itself, so

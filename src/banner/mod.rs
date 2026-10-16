@@ -34,6 +34,8 @@
 
 mod hook;
 
+#[cfg(feature = "dev")]
+pub use hook::rearm;
 pub use hook::take_status;
 
 use crate::mem::{read, rel32_target, write_code_u32};

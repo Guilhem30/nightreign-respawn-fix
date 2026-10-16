@@ -39,8 +39,12 @@ const _: () = assert!(has_bytes(RESPAWN_CONDITION, PATCH_OFFSET, &ORIGINAL));
 /// The 2-byte instruction we switch between `ORIGINAL` and `PATCHED`.
 pub struct PatchSite {
     pub addr: usize,
-    /// The code holds `PATCHED`.
+    /// The code is known to hold `PATCHED`.
     pub active: bool,
+    /// A write was attempted and the original bytes are not confirmed back:
+    /// the code may hold `PATCHED` even if a read could not say so. `disable`
+    /// keeps retrying while this is set.
+    dirty: bool,
 }
 
 impl PatchSite {
@@ -50,10 +54,16 @@ impl PatchSite {
         if !in_one_cache_line(addr, ORIGINAL.len()) {
             return Err("the instruction crosses a cache line, cannot patch it atomically".into());
         }
-        Ok(Self {
+        Ok(Self::at(addr))
+    }
+
+    /// A site at `addr`, holding the original bytes.
+    pub fn at(addr: usize) -> Self {
+        Self {
             addr,
             active: false,
-        })
+            dirty: false,
+        }
     }
 
     fn write(&self, from: [u8; 2], to: [u8; 2]) -> bool {
@@ -62,20 +72,35 @@ impl PatchSite {
 
     /// Skips the weather check (call while a respawn is pending).
     ///
-    /// `active` always follows the bytes actually in memory, not whether the
-    /// write reported success.
+    /// `active` follows the bytes actually in memory, not whether the write
+    /// reported success. The site is marked dirty before the write, so even if
+    /// the read-back fails the code is restored later.
     pub fn enable(&mut self) {
         if !self.active {
+            self.dirty = true;
             self.write(ORIGINAL, PATCHED);
+            // Stress test only: the read-back right after the write fails.
+            #[cfg(feature = "dev")]
+            crate::chaos::arm_readback_fail(self.addr);
             self.active = read::<[u8; 2]>(self.addr) == Some(PATCHED);
         }
     }
 
-    /// Restores the game's original code.
+    /// Restores the game's original code. Safe to call every tick: the write
+    /// only happens if the bytes are still ours, and a failed read or write
+    /// leaves the site dirty so the next call tries again.
     pub fn disable(&mut self) {
-        if self.active {
-            self.write(PATCHED, ORIGINAL);
-            self.active = read::<[u8; 2]>(self.addr) == Some(PATCHED);
+        if !(self.active || self.dirty) {
+            return;
+        }
+        self.write(PATCHED, ORIGINAL);
+        match read::<[u8; 2]>(self.addr) {
+            Some(bytes) if bytes == ORIGINAL => {
+                self.active = false;
+                self.dirty = false;
+            }
+            Some(bytes) => self.active = bytes == PATCHED,
+            None => self.active = false,
         }
     }
 }
@@ -85,5 +110,80 @@ impl PatchSite {
 impl Drop for PatchSite {
     fn drop(&mut self) {
         self.disable();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::Page;
+
+    fn site_on_page() -> (Page, PatchSite) {
+        let page = Page::new();
+        page.put(0x100, ORIGINAL);
+        let site = PatchSite::at(page.addr() + 0x100);
+        (page, site)
+    }
+
+    #[test]
+    fn restore_works_even_if_the_read_back_failed() {
+        // The site was patched but a read could not confirm it (`active` is
+        // false): `disable` must still put the original bytes back.
+        let (page, mut site) = site_on_page();
+        page.put(0x100, PATCHED);
+        site.dirty = true;
+        site.active = false;
+        site.disable();
+        assert_eq!(page.get::<[u8; 2]>(0x100), ORIGINAL);
+        assert!(!site.dirty && !site.active);
+    }
+
+    #[test]
+    fn a_clean_site_never_writes() {
+        // Another mod's bytes at the site: a clean site must not touch them.
+        let (page, mut site) = site_on_page();
+        page.put(0x100, [0x90u8, 0x90]);
+        site.disable();
+        assert_eq!(page.get::<[u8; 2]>(0x100), [0x90, 0x90]);
+    }
+
+    #[test]
+    fn enable_then_disable_round_trips() {
+        let (page, mut site) = site_on_page();
+        site.enable();
+        assert!(site.active);
+        assert_eq!(page.get::<[u8; 2]>(0x100), PATCHED);
+        site.disable();
+        assert!(!site.active && !site.dirty);
+        assert_eq!(page.get::<[u8; 2]>(0x100), ORIGINAL);
+    }
+
+    /// The exact trigger of the stuck-patch bug: the read-back right after the
+    /// write fails, so the site does not know it is patched. `disable` must still
+    /// restore it.
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_failed_readback_after_the_write_still_gets_restored() {
+        use crate::chaos;
+        let (page, mut site) = site_on_page();
+        chaos::configure(chaos::parse_modes("readback_fail"), 0, 1);
+        chaos::set_count(2);
+        site.enable();
+        assert_eq!(
+            page.get::<[u8; 2]>(0x100),
+            PATCHED,
+            "the write itself worked"
+        );
+        assert!(
+            !site.active,
+            "the read-back failed, so the site thinks it is clean"
+        );
+        // The loop calls `disable` every tick: the first call may still hit the
+        // failing reads (it cannot verify the bytes), a later one restores.
+        for _ in 0..5 {
+            site.disable();
+        }
+        chaos::configure(0, 0, 0);
+        assert_eq!(page.get::<[u8; 2]>(0x100), ORIGINAL);
     }
 }

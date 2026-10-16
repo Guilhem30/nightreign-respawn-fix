@@ -47,6 +47,15 @@ pub struct DevSettings {
     /// `test_skip_fix = true` makes the fix count as used without changing
     /// anything, to simulate a fix that does not work.
     pub skip_fix: bool,
+    /// `chaos = read_fail,garbage,flap,write_fail,banner_panic,banner_layout,
+    /// banner_slow`: fault injection for the stress test (see `chaos.rs`).
+    pub chaos_modes: u32,
+    /// `chaos_rate`: faults per 1000 accesses.
+    pub chaos_rate: u32,
+    /// `chaos_seed`: makes a run repeatable (0 = default seed).
+    pub chaos_seed: u64,
+    /// `chaos_count`: how many reads the targeted faults block (default 2).
+    pub chaos_count: u32,
 }
 
 impl Default for Settings {
@@ -80,10 +89,34 @@ impl Settings {
                 "test_skip_fix" => s.dev.skip_fix = on,
                 #[cfg(feature = "dev")]
                 "banner_test" => s.dev.banner_test = parse_banner_test(value),
+                #[cfg(feature = "dev")]
+                "chaos" => s.dev.chaos_modes = crate::chaos::parse_modes(value),
+                #[cfg(feature = "dev")]
+                "chaos_rate" => s.dev.chaos_rate = value.parse().unwrap_or(0),
+                #[cfg(feature = "dev")]
+                "chaos_seed" => s.dev.chaos_seed = value.parse().unwrap_or(0),
+                #[cfg(feature = "dev")]
+                "chaos_count" => s.dev.chaos_count = value.parse().unwrap_or(0),
                 _ => {}
             }
         }
         s
+    }
+
+    #[cfg(feature = "dev")]
+    fn describe_chaos(&self) -> String {
+        if self.dev.chaos_modes == 0 {
+            return String::new();
+        }
+        format!(
+            " TEST: chaos modes={:#x} rate={}/1000 seed={}",
+            self.dev.chaos_modes, self.dev.chaos_rate, self.dev.chaos_seed
+        )
+    }
+
+    #[cfg(not(feature = "dev"))]
+    fn describe_chaos(&self) -> String {
+        String::new()
     }
 
     /// True if the fix should change the game: enabled, and not simulating a
@@ -111,8 +144,8 @@ impl Settings {
                 " TEST: fix skipped"
             } else {
                 ""
-            }
-        )
+            },
+        ) + &self.describe_chaos()
     }
 }
 
@@ -165,6 +198,14 @@ impl Config {
         let settings = Settings::parse(&std::fs::read_to_string(&self.path).unwrap_or_default());
         let changed = settings != self.settings;
         self.settings = settings;
+        #[cfg(feature = "dev")]
+        crate::chaos::configure(
+            settings.dev.chaos_modes,
+            settings.dev.chaos_rate,
+            settings.dev.chaos_seed,
+        );
+        #[cfg(feature = "dev")]
+        crate::chaos::set_count(settings.dev.chaos_count);
         changed
     }
 }
@@ -217,5 +258,44 @@ mod tests {
             Some((4200, Some(Message::NotAvoided)))
         );
         assert_eq!(parse_banner_test("x"), None);
+    }
+
+    #[test]
+    fn random_text_never_panics() {
+        use crate::testutil::Rng;
+        let tokens = [
+            "enabled",
+            "verbose",
+            "notify",
+            "=",
+            "\n",
+            " ",
+            "true",
+            "false",
+            "0",
+            "#",
+            "banner_test",
+            "4200t",
+            "99999999999",
+            "chaos",
+            "chaos_rate",
+            "-1",
+            "\u{fc}",
+            "\0",
+            "test_skip_fix",
+            "\r\n",
+            "====",
+        ];
+        for seed in 1..=500u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let text: String = (0..rng.below(60))
+                .map(|_| tokens[rng.below(tokens.len() as u64) as usize])
+                .collect();
+            let _ = Settings::parse(&text);
+            let bytes: Vec<u8> = (0..rng.below(300)).map(|_| rng.next() as u8).collect();
+            let _ = Settings::parse(&String::from_utf8_lossy(&bytes));
+        }
+        // A huge line is fine too.
+        let _ = Settings::parse(&"x=".repeat(100_000));
     }
 }

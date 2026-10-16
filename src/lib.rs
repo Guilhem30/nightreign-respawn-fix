@@ -36,6 +36,8 @@
 //! them.
 
 mod banner;
+#[cfg(feature = "dev")]
+mod chaos;
 mod config;
 mod death;
 mod fix;
@@ -45,6 +47,8 @@ mod log;
 mod mem;
 mod patch;
 mod scan;
+#[cfg(test)]
+mod testutil;
 
 use std::path::{Path, PathBuf};
 
@@ -73,15 +77,44 @@ pub unsafe extern "system" fn DllMain(module: HMODULE, reason: u32, _: *mut ()) 
         .unwrap_or_else(|| PathBuf::from("."));
     std::thread::Builder::new()
         .name("respawn-gate-fix".into())
-        .spawn(move || {
-            // An internal error stops the fix (the patch is restored on the way
-            // out), never the game.
-            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fix::run(&dir)));
-            if ran.is_err() {
-                log::Log::open(&dir.join(fix::LOG_FILE))
-                    .line("stopped after an internal error; the game's code is restored");
-            }
-        })
+        .spawn(move || run_guarded(&dir, fix::run))
         .ok();
     true
+}
+
+/// Runs the fix; an internal error (a panic) stops the fix, never the game: the
+/// patch is restored while the thread unwinds (`PatchSite::drop`) and the stop is
+/// logged. This is the thread-root safeguard of 0.2.0-beta.
+fn run_guarded(dir: &Path, run: impl FnOnce(&Path)) {
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(dir)));
+    if ran.is_err() {
+        log::Log::open(&dir.join(fix::LOG_FILE))
+            .line("stopped after an internal error; the game's code is restored");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_in_the_fix_is_logged_and_does_not_escape() {
+        let dir = std::env::temp_dir().join(format!("gatefix-root-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_file(dir.join(fix::LOG_FILE));
+        run_guarded(&dir, |_| panic!("internal error"));
+        let log = std::fs::read_to_string(dir.join(fix::LOG_FILE)).unwrap();
+        assert!(log.contains("stopped after an internal error"), "{log}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_normal_return_logs_nothing() {
+        let dir = std::env::temp_dir().join(format!("gatefix-root-ok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_file(dir.join(fix::LOG_FILE));
+        run_guarded(&dir, |_| {});
+        assert!(!dir.join(fix::LOG_FILE).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

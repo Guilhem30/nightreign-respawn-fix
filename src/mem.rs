@@ -63,7 +63,16 @@ pub fn read<T: Copy + Default>(addr: usize) -> Option<T> {
             Some(&mut done),
         )
     };
-    (ok.is_ok() && done == size_of::<T>()).then_some(value)
+    let value = (ok.is_ok() && done == size_of::<T>()).then_some(value)?;
+    // Stress test only: the game's data looks hostile to us (never changes
+    // the game's own memory).
+    #[cfg(feature = "dev")]
+    let value = crate::chaos::hostile_read(value)?;
+    #[cfg(feature = "dev")]
+    if crate::chaos::site_read_blocked(addr) {
+        return None;
+    }
+    Some(value)
 }
 
 /// Reads a pointer; 0 if unreadable.
@@ -73,6 +82,10 @@ pub fn read_ptr(addr: usize) -> usize {
 
 /// Writes a value to game memory; false if the address is not writable.
 pub fn write<T: Copy>(addr: usize, value: T) -> bool {
+    #[cfg(feature = "dev")]
+    if crate::chaos::roll(crate::chaos::Fault::WriteFail) {
+        return false;
+    }
     let mut done = 0usize;
     // SAFETY: the source is a local of exactly `size_of::<T>()` bytes;
     // `WriteProcessMemory` checks the destination address.
@@ -153,6 +166,10 @@ unsafe fn with_writable_code(addr: usize, size: usize, store: impl FnOnce()) -> 
 /// by byte, and a half-written instruction would decode as something else.)
 /// If another mod has changed these bytes since, they are left alone.
 pub fn write_code_u16(addr: usize, from: u16, to: u16) -> bool {
+    #[cfg(feature = "dev")]
+    if crate::chaos::roll(crate::chaos::Fault::WriteFail) {
+        return false;
+    }
     if read::<u16>(addr) != Some(from) || !in_one_cache_line(addr, 2) {
         return false;
     }
@@ -172,6 +189,10 @@ pub fn write_code_u16(addr: usize, from: u16, to: u16) -> bool {
 
 /// Like `write_code_u16`, for 4 bytes (a `rel32`).
 pub fn write_code_u32(addr: usize, from: u32, to: u32) -> bool {
+    #[cfg(feature = "dev")]
+    if crate::chaos::roll(crate::chaos::Fault::WriteFail) {
+        return false;
+    }
     if read::<u32>(addr) != Some(from) || !in_one_cache_line(addr, 4) {
         return false;
     }
@@ -221,5 +242,36 @@ mod tests {
         let code = [0xE8u8, 0xFB, 0xFF, 0xFF, 0xFF];
         let at = code.as_ptr() as usize;
         assert_eq!(rel32_target(at), Some(at));
+    }
+
+    #[test]
+    fn code_write_is_refused_when_the_bytes_are_not_the_expected_ones() {
+        let page = crate::testutil::Page::new();
+        page.put(0x10, [0x90u8, 0x90]);
+        let addr = page.addr() + 0x10;
+        assert!(!write_code_u16(addr, 0xD233, 0x01B2), "another mod's bytes");
+        assert_eq!(page.get::<[u8; 2]>(0x10), [0x90, 0x90]);
+        page.put(0x10, [0x33u8, 0xD2]);
+        assert!(write_code_u16(addr, 0xD233, 0x01B2));
+        assert_eq!(page.get::<[u8; 2]>(0x10), [0xB2, 0x01]);
+        assert!(!write_code_u16(addr, 0xD233, 0x01B2), "already changed");
+    }
+
+    #[test]
+    fn code_write_across_a_cache_line_is_refused() {
+        let page = crate::testutil::Page::new();
+        page.put(0x3f, [0x33u8, 0xD2]);
+        assert!(!write_code_u16(page.addr() + 0x3f, 0xD233, 0x01B2));
+        assert_eq!(page.get::<[u8; 2]>(0x3f), [0x33, 0xD2]);
+    }
+
+    #[test]
+    fn unreadable_memory_reads_as_none() {
+        let mut page = crate::testutil::Page::new();
+        let addr = page.addr();
+        page.release();
+        assert_eq!(read::<u32>(addr), None);
+        assert!(!write::<u8>(addr, 1));
+        assert_eq!(read_ptr(addr), 0);
     }
 }

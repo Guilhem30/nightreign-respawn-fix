@@ -1,6 +1,6 @@
 # Respawn Gate Fix (Elden Ring Nightreign)
 
-**Version 0.3.0-beta.** This is a beta: it works on the cases I could
+**Version 0.3.1-beta.** This is a beta: it works on the cases I could
 reproduce, and its log collects details on the cases it may not cover yet
 (see [Reporting a problem](#reporting-a-problem)).
 

@@ -139,11 +139,17 @@ impl Death {
     /// the expedition ends), and its memory reused by something else. So the
     /// flag is only cleared on blocks that are still in the block map, under
     /// the same id, with the flag still set.
+    ///
+    /// If the block map cannot be read at this moment (the game is editing
+    /// it), nothing is dropped: the flags stay listed and the next call
+    /// tries again.
     pub fn clear_flags(&mut self, game: &Game) {
         if self.flagged_blocks.is_empty() {
             return;
         }
-        let live = game.geometry_blocks();
+        let Some(live) = game.geometry_blocks() else {
+            return;
+        };
         for (id, block) in self.flagged_blocks.drain(..) {
             if live.contains(&(id, block)) && read::<u8>(block + BLOCK_FADE_INSTANT) == Some(1) {
                 write::<u8>(block + BLOCK_FADE_INSTANT, 0);
@@ -155,6 +161,12 @@ impl Death {
     /// the respawn started a weather transition or took long. Returns the
     /// on-screen message for this respawn (see `message`).
     pub fn report(mut self, game: &Game, settings: &Settings, log: &mut Log) -> Option<Message> {
+        if !self.flagged_blocks.is_empty() {
+            log.line(&format!(
+                "could not clear the fade flag of {} scenery block(s): the block map was unreadable",
+                self.flagged_blocks.len()
+            ));
+        }
         let ended = self.ended.unwrap_or_else(Instant::now);
         let elapsed = ended - self.since;
         let long = elapsed >= LONG_RESPAWN;

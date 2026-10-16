@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1-beta
+
+Reliability release; the fix works the same way.
+
+- Fixed a rare case where the mod's change to the game could stay in place
+  after a respawn. It is now put back, and retried until it is confirmed.
+- Scenery changes are now retried after a respawn if the game's scenery
+  list can't be read at that moment.
+- Optimized release dll size
+
 ## 0.3.0-beta
 
 - New on-screen message after a respawn the fix had to handle: "Delayed
